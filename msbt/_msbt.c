@@ -182,6 +182,7 @@ PyDoc_STRVAR(msbt_socket_doc, "TODO");
 static PyObject *
 msbt_bind(PyObject *self, PyObject *args)
 {
+    PyObject *addrobj = NULL;
     wchar_t *addrstr = NULL;
     Py_ssize_t addrstrlen = -1;
     int sockfd = -1;
@@ -193,15 +194,27 @@ msbt_bind(PyObject *self, PyObject *args)
     SOCKADDR_BTH sa = { 0 };
     int sa_len = sizeof(sa);
 
-    if(!PyArg_ParseTuple(args, "iu#i", &sockfd, &addrstr, &addrstrlen, &port))
+    if(!PyArg_ParseTuple(args, "iOi", &sockfd, &addrobj, &port))
         return 0;
 
-    if( addrstrlen == 0 ) {
+    if (addrobj == Py_None) {
         sa.btAddr = 0;
     } else {
-        _CHECK_OR_RAISE_WSA( NO_ERROR == WSAStringToAddress( addrstr, \
-                    AF_BTH, NULL, (LPSOCKADDR)&sa, &sa_len ) );
+        addrstr = PyUnicode_AsWideCharString(addrobj, &addrstrlen);
+        if (addrstr == NULL) {
+            return 0;  // Exception already set by PyUnicode_AsWideCharString
+        }
+
+        if (addrstrlen == 0) {
+            sa.btAddr = 0;
+        } else {
+            _CHECK_OR_RAISE_WSA( NO_ERROR == WSAStringToAddress( addrstr, \
+                        AF_BTH, NULL, (LPSOCKADDR)&sa, &sa_len ) );
+        }
+
+        PyMem_Free(addrstr);
     }
+
     sa.addressFamily = AF_BTH;
     sa.port = port;
 
