@@ -1,66 +1,253 @@
-name: Build
+name: Build and publish to devpi
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  DEVPI_SERVER: https://stablekite.com:4438/
+  DEVPI_TARGET_INDEX: https://stablekite.com:4438/StableKite/index/
 
 jobs:
-  build-wheel:
+  build-wheels:
+    name: Wheel
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.7', '3.8', '3.9', '3.10', '3.11']
-        os: [macOS-latest, windows-latest]
+        target:
+          - Windows x86_64
+          - manylinux x86_64
+          - manylinux aarch64
+          - musllinux x86_64
+          - musllinux aarch64
+        include:
+          - target: Windows x86_64
+            id: windows-x64
+            runner: windows-latest
+            cibw_build: cp314t-win_amd64
+            before_all: ""
 
-    runs-on: ${{ matrix.os }}
+          - target: manylinux x86_64
+            id: manylinux-x64
+            runner: ubuntu-24.04
+            cibw_build: cp314t-manylinux_x86_64
+            before_all: dnf install -y bluez-libs-devel
+
+          - target: manylinux aarch64
+            id: manylinux-arm64
+            runner: ubuntu-24.04-arm
+            cibw_build: cp314t-manylinux_aarch64
+            before_all: dnf install -y bluez-libs-devel
+
+          - target: musllinux x86_64
+            id: musllinux-x64
+            runner: ubuntu-24.04
+            cibw_build: cp314t-musllinux_x86_64
+            before_all: apk add --no-cache bluez-dev
+
+          - target: musllinux aarch64
+            id: musllinux-arm64
+            runner: ubuntu-24.04-arm
+            cibw_build: cp314t-musllinux_aarch64
+            before_all: apk add --no-cache bluez-dev
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
-    - uses: actions/checkout@v1
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v1
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Lint
-      run: |
-        pip install flake8
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=./.*,./contrib/bluez/test/sap_client.py
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Build
-      run: |
-        pip install wheel
-        python setup.py bdist_wheel
-    - name: Upload wheel
-      uses: actions/upload-artifact@v1
-      with:
-        name: dist
-        path: dist
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-  build-wheel-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v1
-      - uses: RalfG/python-wheels-manylinux-build@v0.3.1-manylinux2014_x86_64
-        with:
-          python-versions: 'cp37-cp37m cp38-cp38 cp39-cp39 cp310-cp310 cp311-cp311'
-          system-packages: 'bluez bluez-libs bluez-libs-devel'
-      - name: Upload wheel
-        uses: actions/upload-artifact@v1
-        with:
-          name: dist
-          path: dist
+      - name: Build wheel
+        uses: pypa/cibuildwheel@v4.2.1
+        env:
+          CIBW_BUILD: ${{ matrix.cibw_build }}
+          CIBW_BEFORE_ALL_LINUX: ${{ matrix.before_all }}
+          CIBW_BUILD_VERBOSITY: "1"
 
-  package_source:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v1
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v1
+          # PyBluez links only against Windows system Bluetooth/socket
+          # libraries (WS2_32 and Bthprops). On current Windows runners,
+          # delvewheel follows Windows API-set contracts (ext-ms-win-*.dll)
+          # and may fail because those virtual loader aliases are not files
+          # that should be bundled into the wheel. No third-party DLLs need
+          # vendoring here, so skip Windows wheel repair entirely.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
+
+          CIBW_TEST_COMMAND: >-
+            python -c "import bluetooth, sysconfig;
+            assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1;
+            print('PyBluez', bluetooth.__version__)"
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Make source distribution
-        run: python setup.py sdist
+          output-dir: wheelhouse
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.id }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+
+  source:
+    name: Source distribution
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.14t
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14t"
+
+      - name: Install build frontend
+        run: python -m pip install build wheel
+
+      - name: Build source distribution
+        run: python -m build --sdist --outdir dist
+
       - name: Upload source distribution
-        uses: actions/upload-artifact@v1
+        uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+
+  publish:
+    name: Publish to devpi
+    needs:
+      - build-wheels
+      - source
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: incoming/wheels
+
+      - name: Download source distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: incoming/sdist
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Prepare and verify artifacts
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import shutil
+          import tarfile
+          import zipfile
+
+          incoming = Path("incoming")
+          dist = Path("dist")
+          dist.mkdir(exist_ok=True)
+
+          artifacts = sorted(
+              path
+              for path in incoming.rglob("*")
+              if path.is_file()
+              and (path.suffix == ".whl" or path.name.endswith(".tar.gz"))
+          )
+
+          if len([p for p in artifacts if p.suffix == ".whl"]) != 5:
+              raise SystemExit(
+                  "Expected exactly five wheels, found: "
+                  + repr([p.name for p in artifacts if p.suffix == ".whl"])
+              )
+
+          if len([p for p in artifacts if p.name.endswith(".tar.gz")]) != 1:
+              raise SystemExit(
+                  "Expected exactly one source distribution, found: "
+                  + repr([p.name for p in artifacts if p.name.endswith(".tar.gz")])
+              )
+
+          origins = {}
+
+          for source in artifacts:
+              if source.suffix == ".whl":
+                  try:
+                      with zipfile.ZipFile(source) as archive:
+                          bad = archive.testzip()
+                  except zipfile.BadZipFile as exc:
+                      raise SystemExit(f"Invalid wheel {source}: {exc}") from exc
+
+                  if bad is not None:
+                      raise SystemExit(f"Invalid wheel {source}: bad member {bad}")
+
+              elif source.name.endswith(".tar.gz"):
+                  try:
+                      with tarfile.open(source, "r:gz") as archive:
+                          archive.getmembers()
+                  except tarfile.TarError as exc:
+                      raise SystemExit(f"Invalid sdist {source}: {exc}") from exc
+
+              target = dist / source.name
+
+              if not target.exists():
+                  shutil.copy2(source, target)
+                  origins[source.name] = source
+                  continue
+
+              old_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+              new_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+              if old_hash == new_hash:
+                  print(f"Skipping identical duplicate: {source.name}")
+                  continue
+
+              first = origins.get(source.name, target)
+              raise SystemExit(
+                  "\nDifferent artifacts have the same filename:\n"
+                  f"  {source.name}\n"
+                  f"  first:  {first}\n"
+                  f"  second: {source}\n"
+              )
+
+          print("\nArtifacts to publish:")
+          for artifact in sorted(dist.iterdir()):
+              print(f"  {artifact.name} ({artifact.stat().st_size} bytes)")
+          PY
+
+      - name: Install devpi tools
+        run: python -m pip install devpi-client devpi-tokens
+
+      - name: Publish
+        env:
+          DEVPI_TOKEN: ${{ secrets.DEVPI_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DEVPI_TOKEN:-}" ]; then
+            echo "::error::DEVPI_TOKEN is not available to this repository."
+            exit 1
+          fi
+
+          TOKEN_FILE="$RUNNER_TEMP/devpi-token"
+          printf '%s' "$DEVPI_TOKEN" > "$TOKEN_FILE"
+          chmod 600 "$TOKEN_FILE"
+          trap 'rm -f "$TOKEN_FILE"' EXIT
+
+          devpi use "$DEVPI_SERVER"
+          devpi token-login -f "$TOKEN_FILE"
+          devpi use "$DEVPI_TARGET_INDEX"
+          devpi upload dist/*
