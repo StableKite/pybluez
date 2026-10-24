@@ -1,5 +1,5 @@
 {
-  "source_commit": "3800b9376a442733701877112f3432805e7713f4",
+  "source_commit": "34fad5ec7e14b1f1e7a025e31df7c4f507e869cb",
   "source_backend": "setuptools.build_meta:__legacy__",
   "source_backend_path": [],
   "minimum_glibc": [
@@ -16,13 +16,14 @@
   ],
   "delivery_source_hashes": {
     "_binary_wheel_backend.py": "fc4697ea1ee586c2ae3df2397be14ef13246f7b7b8f42485057e36c0852fe37a",
-    "README.binary-wheels.md": "05617ca74a60f542d4f2a146f8e5308158d123ba97856b6b3e0deebd3a5b1595",
+    "README.binary-wheels.md": "294bd6cf8a0cf000dc444817fcf3ec39a4116ca900f5b931f18c6c573836d829",
     "pyproject.toml": "889a8a53f45eb6171dd26f57ecf3bbba98101bbeed57b9e4faa80701dcc790c7",
     "MANIFEST.in": "995b2dd19a62759bdcc1a384d84eb0f3a7fab2258596c053a02f949c9a8b2358"
   },
   "artifact": {
-    "filename": "pybluez-0.31-cp315-cp315t-manylinux_2_38_x86_64.manylinux_2_39_x86_64.whl",
-    "url": "https://github.com/StableKite/pybluez/releases/download/cp315t-linux-r68-20261024/pybluez-0.31-cp315-cp315t-manylinux_2_38_x86_64.manylinux_2_39_x86_64.whl",
-    "sha256": "56e46cb8d60310e44b47acbc3e3e1da55da760622ce64765de6a5501d7f08865"
-  }
+    "filename": "pybluez-0.31-1-cp315-cp315t-manylinux_2_39_x86_64.whl",
+    "sha256": "d1a4fb0de74258249b1ad9fd9eee4dd387b7e0e424b072b7b516fd4e4fc582ea",
+    "url": "https://github.com/StableKite/pybluez/releases/download/cp315t-linux-r68-default-giloff-20261024/pybluez-0.31-1-cp315-cp315t-manylinux_2_39_x86_64.whl"
+  },
+  "runtime_gil_override_required": false
 }

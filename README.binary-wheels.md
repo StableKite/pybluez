@@ -12,3 +12,7 @@ the source commit, artifact hash and the checked delivery metadata. Source
 builds retain their ordinary development-library prerequisites.
 
 These are engineering dependency artifacts, not a StableKite release.
+
+The Linux native module now preserves default GIL OFF. Eight hardware-free tests cover
+binary filters, socketpair I/O, concurrent close, timeout state and closed SDP sessions.
+See README.free-threading.md for socket/advertisement ownership rules.
