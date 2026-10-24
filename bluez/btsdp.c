@@ -58,7 +58,7 @@ TODO\n\
  * service record match
  */
 static PyObject *
-do_search( sdp_session_t *sess, uuid_t *uuid )
+do_search( PySDPSessionObject *owner, uuid_t *uuid )
 {
     sdp_list_t *response_list = NULL, *attrid_list, *search_list, *r;
     uint32_t range = 0x0000ffff;
@@ -73,8 +73,13 @@ do_search( sdp_session_t *sess, uuid_t *uuid )
 
     // perform the search
     Py_BEGIN_ALLOW_THREADS
-    err = sdp_service_search_attr_req( sess, search_list, \
-            SDP_ATTR_REQ_RANGE, attrid_list, &response_list);
+    PyThread_acquire_lock(owner->session_lock, 1);
+    if (owner->session) {
+        err = sdp_service_search_attr_req(owner->session, search_list,
+                SDP_ATTR_REQ_RANGE, attrid_list, &response_list);
+    }
+    else { errno = EBADF; err = -1; }
+    PyThread_release_lock(owner->session_lock);
     Py_END_ALLOW_THREADS
     if( err ) {
         PyErr_SetFromErrno( bluetooth_error );
@@ -229,35 +234,25 @@ cleanup:
 static PyObject *
 sess_connect(PySDPSessionObject *s, PyObject *args, PyObject *kwds)
 {
-    bdaddr_t src; 
-    bdaddr_t dst; 
-    char *dst_buf = "localhost";
-    uint32_t flags = SDP_RETRY_IF_BUSY;
-
-	static char *keywords[] = {"target", 0};
-
-    bacpy( &src, BDADDR_ANY );
-    bacpy( &dst, BDADDR_LOCAL );
-
-    if( s->session != NULL ) {
-        sdp_close( s->session );
-    }
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|s", keywords, &dst_buf))
+    bdaddr_t src, dst;
+    char *target = "localhost";
+    int failed;
+    static char *keywords[] = {"target", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|s", keywords, &target)) return NULL;
+    bacpy(&src, BDADDR_ANY);
+    bacpy(&dst, BDADDR_LOCAL);
+    if (strcmp(target, "localhost") && str2ba(target, &dst) < 0) {
+        PyErr_SetString(PyExc_ValueError, "invalid Bluetooth address");
         return NULL;
-
-    if( strncmp( dst_buf, "localhost", 18 ) != 0 ) {
-        str2ba( dst_buf, &dst );
-    } else {
-        // XXX
     }
-
-	Py_BEGIN_ALLOW_THREADS
-    s->session = sdp_connect( &src, &dst, flags );
-	Py_END_ALLOW_THREADS
-    if( s->session == NULL ) 
-        return PyErr_SetFromErrno( bluetooth_error );
-
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(s->session_lock, 1);
+    if (s->session) sdp_close(s->session);
+    s->session = sdp_connect(&src, &dst, SDP_RETRY_IF_BUSY);
+    failed = s->session == NULL;
+    PyThread_release_lock(s->session_lock);
+    Py_END_ALLOW_THREADS
+    if (failed) return PyErr_SetFromErrno(bluetooth_error);
     Py_RETURN_NONE;
 }
 PyDoc_STRVAR(sess_connect_doc,
@@ -275,12 +270,12 @@ Raises _bluetooth.error if something goes wrong");
 static PyObject *
 sess_close(PySDPSessionObject *s)
 {
-    if( s->session != NULL ) {
-        Py_BEGIN_ALLOW_THREADS
-        sdp_close( s->session );
-        Py_END_ALLOW_THREADS
-        s->session = NULL;
-    }
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(s->session_lock, 1);
+    if (s->session) sdp_close(s->session);
+    s->session = NULL;
+    PyThread_release_lock(s->session_lock);
+    Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
 PyDoc_STRVAR(sess_close_doc,
@@ -292,7 +287,17 @@ Closes the connection with the SDP server.  No effect if a session is not open."
 static PyObject *
 sess_fileno(PySDPSessionObject *s)
 {
-	return PyLong_FromLong((long) s->session->sock);
+    int fd;
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(s->session_lock, 1);
+    fd = s->session ? s->session->sock : -1;
+    PyThread_release_lock(s->session_lock);
+    Py_END_ALLOW_THREADS
+    if (fd < 0) {
+        PyErr_SetString(bluetooth_error, "SDP session is not active!");
+        return NULL;
+    }
+    return PyLong_FromLong(fd);
 }
 PyDoc_STRVAR(sess_fileno_doc,
 "fileno() -> integer\n\
@@ -316,14 +321,9 @@ sess_search(PySDPSessionObject *s, PyObject *args, PyObject *kwds)
         return NULL;
     }
 
-    // make sure the SDP session is open
-    if( ! s->session ) {
-        PyErr_SetString( bluetooth_error, "SDP session is not active!" );
-        return 0;
-     }
 
     // perform the search
-    result = do_search( s->session, &uuid );
+    result = do_search( s, &uuid );
 
     return result;
 }
@@ -346,14 +346,9 @@ sess_browse(PySDPSessionObject *s)
     // convert the UUID string into a uuid_t
     sdp_uuid16_create(&uuid, PUBLIC_BROWSE_GROUP);
 
-    // make sure the SDP session is open
-    if( ! s->session ) {
-        PyErr_SetString( bluetooth_error, "SDP session is not active!" );
-        return 0;
-     }
 
     // perform the search
-    result = do_search( s->session, &uuid );
+    result = do_search( s, &uuid );
 
     return result;
 }
@@ -389,19 +384,21 @@ sess_dealloc(PySDPSessionObject *s)
         sdp_close( s->session );
         s->session = NULL;
     }
+    if (s->session_lock) PyThread_free_lock(s->session_lock);
     Py_TYPE(s)->tp_free((PyObject *)s);
 }
 
 static PyObject *
 sess_repr(PySDPSessionObject *s)
 {
-    char buf[512];
-    if (s->session != NULL) {
-        PyOS_snprintf( buf, sizeof(buf), "<SDP Session object - connected>");
-    } else { 
-        PyOS_snprintf( buf, sizeof(buf), "<SDP Session object - unconnected>");
-    }
-    return PyUnicode_FromString(buf);
+    int connected;
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(s->session_lock, 1);
+    connected = s->session != NULL;
+    PyThread_release_lock(s->session_lock);
+    Py_END_ALLOW_THREADS
+    return PyUnicode_FromString(connected ? "<SDP Session object - connected>"
+                                         : "<SDP Session object - unconnected>");
 }
 
 
@@ -414,7 +411,13 @@ sess_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 
 	newsess = type->tp_alloc(type, 0);
 	if (newsess != NULL) {
-        ((PySDPSessionObject *)newsess)->session = NULL;
+        PySDPSessionObject *s = (PySDPSessionObject *)newsess;
+        s->session = NULL;
+        s->session_lock = PyThread_allocate_lock();
+        if (!s->session_lock) {
+            Py_DECREF(newsess);
+            return PyErr_NoMemory();
+        }
 	}
 	return newsess;
 }

@@ -19,6 +19,9 @@ Local naming conventions:
 #define PY_SSIZE_T_CLEAN 1
 #include "Python.h"
 #include "btmodule.h"
+#include <poll.h>
+#include <limits.h>
+#include <math.h>
 #include "structmember.h"
 
 #include "pythoncapi_compat.h"
@@ -132,37 +135,24 @@ internal_setblocking(PySocketSockObject *s, int block)
 static int
 internal_select(PySocketSockObject *s, int writing)
 {
-	fd_set fds;
-	struct timeval tv;
-	int n;
-
-	/* Nothing to do unless we're in timeout mode (not non-blocking) */
-	if (s->sock_timeout <= 0.0)
-		return 0;
-
-	/* Guard against closed socket */
-	if (s->sock_fd < 0)
-		return 0;
-
-	/* Construct the arguments to select */
-	tv.tv_sec = (int)s->sock_timeout;
-	tv.tv_usec = (int)((s->sock_timeout - tv.tv_sec) * 1e6);
-	FD_ZERO(&fds);
-	FD_SET(s->sock_fd, &fds);
-
-	/* See if the socket is ready */
-	if (writing)
-		n = select(s->sock_fd+1, NULL, &fds, NULL, &tv);
-	else
-		n = select(s->sock_fd+1, &fds, NULL, NULL, &tv);
-	if (n == 0)
-		return 1;
-	return 0;
+    /* One atomic snapshot avoids FD_SET(-1) stack corruption if another
+     * thread closes the socket, and poll also supports descriptors >1023. */
+    int fd = s->sock_fd, millis, result;
+    double timeout = s->sock_timeout;
+    struct pollfd descriptor;
+    if (timeout <= 0.0 || fd < 0) return 0;
+    if (!isfinite(timeout) || timeout * 1000.0 >= INT_MAX) millis = INT_MAX;
+    else millis = (int)ceil(timeout * 1000.0);
+    descriptor.fd = fd;
+    descriptor.events = writing ? POLLOUT : POLLIN;
+    descriptor.revents = 0;
+    result = poll(&descriptor, 1, millis);
+    return result == 0;
 }
 
 /* Initialize a new socket object. */
 
-static double defaulttimeout = -1.0; /* Default timeout for new sockets */
+static BT_ATOMIC(double) defaulttimeout = -1.0; /* Default timeout for new sockets */
 
 static void
 init_sockobject(PySocketSockObject *s, int fd, int family, int type, int proto)
@@ -171,11 +161,12 @@ init_sockobject(PySocketSockObject *s, int fd, int family, int type, int proto)
 	s->sock_family = family;
 	s->sock_type = type;
 	s->sock_proto = proto;
-	s->sock_timeout = defaulttimeout;
+	double timeout_snapshot = defaulttimeout;
+	s->sock_timeout = timeout_snapshot;
 
 	s->errorhandler = &set_error;
 
-	if (defaulttimeout >= 0.0)
+	if (timeout_snapshot >= 0.0)
 		internal_setblocking(s, 0);
 }
 
@@ -725,26 +716,36 @@ operations are disabled.");
 static PyObject *
 sock_setsockopt(PySocketSockObject *s, PyObject *args)
 {
-    int level;
-    int optname;
-    int res;
-    void *buf;
-    Py_ssize_t buflen;
-    int flag;
-
-    if (PyArg_ParseTuple(args, "iii:setsockopt", &level, &optname, &flag)) {
-        buf = (void *) &flag;
-        buflen = sizeof flag;
-    } else {
-        PyErr_Clear();
-        if (!PyArg_ParseTuple(args, "iis#:setsockopt",
-                &level, &optname, &buf, &buflen)) {
+    int level, option, flag, result;
+    PyObject *value, *bytes = NULL;
+    const void *data;
+    Py_ssize_t size;
+    if (!PyArg_ParseTuple(args, "iiO:setsockopt", &level, &option, &value)) return NULL;
+    if (PyIndex_Check(value)) {
+        long converted = PyLong_AsLong(value);
+        if (converted == -1 && PyErr_Occurred()) return NULL;
+        if (converted < INT_MIN || converted > INT_MAX) {
+            PyErr_SetString(PyExc_OverflowError, "socket option integer out of range");
             return NULL;
         }
+        flag = (int)converted;
+        data = &flag;
+        size = sizeof(flag);
     }
-    res = setsockopt(s->sock_fd, level, optname, buf, buflen);
-    if (res < 0)
-        return s->errorhandler();
+    else {
+        bytes = PyBytes_FromObject(value);
+        if (!bytes) return NULL;
+        data = PyBytes_AS_STRING(bytes);
+        size = PyBytes_GET_SIZE(bytes);
+    }
+    if (size > INT_MAX) {
+        Py_XDECREF(bytes);
+        PyErr_SetString(PyExc_OverflowError, "socket option buffer too large");
+        return NULL;
+    }
+    result = setsockopt(s->sock_fd, level, option, data, (socklen_t)size);
+    Py_XDECREF(bytes);
+    if (result < 0) return s->errorhandler();
     Py_RETURN_NONE;
 }
 
@@ -879,21 +880,12 @@ Bind the socket to a local address.  address must always be a tuple.\n\
 static PyObject *
 sock_close(PySocketSockObject *s)
 {
-	int fd;
-
-	if ((fd = s->sock_fd) != -1) {
-		s->sock_fd = -1;
-		Py_BEGIN_ALLOW_THREADS
-		(void) close(fd);
-		Py_END_ALLOW_THREADS
-	}
-
-    if( s->sdp_session ) {
-        sdp_close( s->sdp_session );
-        s->sdp_record_handle = 0;
-        s->sdp_session = NULL;
-    }
-
+    int fd = bt_take_fd(s);
+    sdp_session_t *session = bt_take_advertisement(s);
+    Py_BEGIN_ALLOW_THREADS
+    if (fd != -1) (void)close(fd);
+    if (session) sdp_close(session);
+    Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
 
@@ -1504,20 +1496,13 @@ static PyGetSetDef sock_getsetlist[] = {
 static void
 sock_dealloc(PySocketSockObject *s)
 {
-    // close the OS file descriptor
-	if (s->sock_fd != -1) {
-        Py_BEGIN_ALLOW_THREADS
-		close(s->sock_fd);
-        Py_END_ALLOW_THREADS
-    }
-
-    if( s->sdp_session ) {
-        sdp_close( s->sdp_session );
-        s->sdp_record_handle = 0;
-        s->sdp_session = NULL;
-    }
-
-	Py_TYPE(s)->tp_free((PyObject *)s);
+    int fd = bt_take_fd(s);
+    sdp_session_t *session = bt_take_advertisement(s);
+    Py_BEGIN_ALLOW_THREADS
+    if (fd != -1) close(fd);
+    if (session) sdp_close(session);
+    Py_END_ALLOW_THREADS
+    Py_TYPE(s)->tp_free((PyObject *)s);
 }
 
 
@@ -1863,10 +1848,9 @@ Convert a 32-bit integer from host to bluetooth byte order.");
 static PyObject *
 bt_getdefaulttimeout(PyObject *self)
 {
-    if (defaulttimeout < 0.0)
-        Py_RETURN_NONE;
-    else
-        return PyFloat_FromDouble(defaulttimeout);
+    double value = defaulttimeout;
+    if (value < 0.0) Py_RETURN_NONE;
+    return PyFloat_FromDouble(value);
 }
 
 PyDoc_STRVAR(bt_getdefaulttimeout_doc,
@@ -2247,7 +2231,7 @@ static PyObject*
 bt_hci_event_name(PyObject *self, PyObject *args)
 {
    int eventNum;
-   PyArg_ParseTuple(args,"i", &eventNum);
+   if (!PyArg_ParseTuple(args,"i", &eventNum)) return NULL;
    if ((eventNum > EVENT_NUM) || (eventNum < 0)) {
            PyErr_SetString(bluetooth_error,
                            "hci_event_name: invalid event number");
@@ -2265,59 +2249,73 @@ Returns a string withe description of the HCI event.\n\
 \n\
 Returns the name of the device, or raises an error on failure");
 
-// lot of repetitive code... yay macros!!
-#define DECL_HCI_FILTER_OP_1(name, docstring) \
-static PyObject * bt_hci_filter_ ## name (PyObject *self, PyObject *args )\
-{ \
-    char *param; \
-    Py_ssize_t len; \
-    int arg; \
-    if( !PyArg_ParseTuple(args,"s#i", &param, &len, &arg) ) \
-        return 0; \
-    if( len != sizeof(struct hci_filter) ) { \
-        PyErr_SetString(PyExc_ValueError, "bad filter"); \
-        return 0; \
-    } \
-    hci_filter_ ## name ( arg, (struct hci_filter*)param ); \
-    return PyUnicode_FromStringAndSize(param, len); \
-} \
-PyDoc_STRVAR(bt_hci_filter_ ## name ## _doc, docstring);
 
-DECL_HCI_FILTER_OP_1(set_ptype, "set ptype!")
-DECL_HCI_FILTER_OP_1(clear_ptype, "clear ptype!")
-DECL_HCI_FILTER_OP_1(test_ptype, "test ptype!")
-
-DECL_HCI_FILTER_OP_1(set_event, "set event!")
-DECL_HCI_FILTER_OP_1(clear_event, "clear event!")
-DECL_HCI_FILTER_OP_1(test_event, "test event!")
-
-DECL_HCI_FILTER_OP_1(set_opcode, "set opcode!")
-DECL_HCI_FILTER_OP_1(test_opcode, "test opcode!")
-
-#undef DECL_HCI_FILTER_OP_1
-
-#define DECL_HCI_FILTER_OP_2(name, docstring) \
-static PyObject * bt_hci_filter_ ## name (PyObject *self, PyObject *args )\
-{ \
-    char *param; \
-    Py_ssize_t len; \
-    if( !PyArg_ParseTuple(args,"s#", &param, &len) ) \
-        return 0; \
-    if( len != sizeof(struct hci_filter) ) { \
-       PyErr_SetString(PyExc_ValueError, "bad filter"); \
-        return 0; \
-    } \
-    hci_filter_ ## name ( (struct hci_filter*)param ); \
-    return PyUnicode_FromStringAndSize(param, len); \
-} \
-PyDoc_STRVAR(bt_hci_filter_ ## name ## _doc, docstring);
-
-DECL_HCI_FILTER_OP_2(all_events, "all events!");
-DECL_HCI_FILTER_OP_2(clear, "clear filter");
-DECL_HCI_FILTER_OP_2(all_ptypes, "all packet types!");
-DECL_HCI_FILTER_OP_2(clear_opcode, "clear opcode!")
-
-#undef DECL_HCI_FILTER_OP_2
+/* Copy into an aligned native struct and hold bytearray's critical section
+ * through copy/update/copy-back. Immutable input is never modified. */
+static PyObject *
+bt_filter_operation(PyObject *args, int operation, int has_argument)
+{
+    PyObject *input, *result = NULL;
+    int argument = 0, predicate = -1, valid = 0;
+    struct hci_filter filter;
+    if (has_argument) {
+        if (!PyArg_ParseTuple(args, "Oi", &input, &argument)) return NULL;
+    }
+    else if (!PyArg_ParseTuple(args, "O", &input)) return NULL;
+    if (!PyBytes_Check(input) && !PyByteArray_Check(input)) {
+        PyErr_SetString(PyExc_TypeError, "HCI filter must be bytes or bytearray");
+        return NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION(input);
+    Py_ssize_t length = PyByteArray_Check(input) ? PyByteArray_GET_SIZE(input) : PyBytes_GET_SIZE(input);
+    if (length == sizeof(filter)) {
+        const char *data = PyByteArray_Check(input) ? PyByteArray_AS_STRING(input) : PyBytes_AS_STRING(input);
+        memcpy(&filter, data, sizeof(filter));
+        valid = 1;
+        switch (operation) {
+            case 0: hci_filter_set_ptype(argument, &filter); break;
+            case 1: hci_filter_clear_ptype(argument, &filter); break;
+            case 2: predicate = hci_filter_test_ptype(argument, &filter); break;
+            case 3: hci_filter_set_event(argument, &filter); break;
+            case 4: hci_filter_clear_event(argument, &filter); break;
+            case 5: predicate = hci_filter_test_event(argument, &filter); break;
+            case 6: hci_filter_set_opcode(argument, &filter); break;
+            case 7: predicate = hci_filter_test_opcode(argument, &filter); break;
+            case 8: hci_filter_all_events(&filter); break;
+            case 9: hci_filter_clear(&filter); break;
+            case 10: hci_filter_all_ptypes(&filter); break;
+            case 11: hci_filter_clear_opcode(&filter); break;
+        }
+        if (PyByteArray_Check(input) && predicate == -1)
+            memcpy(PyByteArray_AS_STRING(input), &filter, sizeof(filter));
+    }
+    Py_END_CRITICAL_SECTION();
+    if (!valid) {
+        PyErr_SetString(PyExc_ValueError, "bad filter");
+        return NULL;
+    }
+    if (predicate != -1) result = PyBool_FromLong(predicate);
+    else if (PyByteArray_Check(input)) result = Py_NewRef(input);
+    else result = PyBytes_FromStringAndSize((char *)&filter, sizeof(filter));
+    return result;
+}
+#define BT_FILTER_METHOD(name, operation, has_argument) \
+static PyObject *bt_hci_filter_##name(PyObject *self, PyObject *args) \
+{ return bt_filter_operation(args, operation, has_argument); } \
+PyDoc_STRVAR(bt_hci_filter_##name##_doc, "Operate on a binary HCI filter without mutating immutable input.");
+BT_FILTER_METHOD(set_ptype, 0, 1)
+BT_FILTER_METHOD(clear_ptype, 1, 1)
+BT_FILTER_METHOD(test_ptype, 2, 1)
+BT_FILTER_METHOD(set_event, 3, 1)
+BT_FILTER_METHOD(clear_event, 4, 1)
+BT_FILTER_METHOD(test_event, 5, 1)
+BT_FILTER_METHOD(set_opcode, 6, 1)
+BT_FILTER_METHOD(test_opcode, 7, 1)
+BT_FILTER_METHOD(all_events, 8, 0)
+BT_FILTER_METHOD(clear, 9, 0)
+BT_FILTER_METHOD(all_ptypes, 10, 0)
+BT_FILTER_METHOD(clear_opcode, 11, 0)
+#undef BT_FILTER_METHOD
 
 static PyObject *
 bt_cmd_opcode_pack(PyObject *self, PyObject *args )
@@ -2549,7 +2547,7 @@ bt_hci_filter_new(PyObject *self, PyObject *args)
     struct hci_filter flt;
     int len = sizeof(flt);
     hci_filter_clear( &flt );
-    return Py_BuildValue("s#", (char*)&flt, len);
+    return PyByteArray_FromStringAndSize((char *)&flt, len);
 }
 PyDoc_STRVAR(bt_hci_filter_new_doc,
 "hci_filter_new()\n\
@@ -3050,6 +3048,9 @@ PyInit__bluetooth(void)
     PyObject *m = PyModule_Create(&moduledef);
     if (m == NULL)
         INITERROR;
+#ifdef Py_GIL_DISABLED
+    PyUnstable_Module_SetGIL(m, Py_MOD_GIL_NOT_USED);
+#endif
 
     bluetooth_error = PyErr_NewException("_bluetooth.error", NULL, NULL);
     if (bluetooth_error == NULL)

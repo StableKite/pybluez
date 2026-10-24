@@ -7,6 +7,7 @@
 typedef struct {
     PyObject_HEAD
     sdp_session_t *session;
+    PyThread_type_lock session_lock;
 
 	PyObject *(*errorhandler)(void); /* Error handler; checks
 					    errno, returns NULL and
