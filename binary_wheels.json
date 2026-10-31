@@ -1,5 +1,5 @@
 {
-  "source_commit": "34fad5ec7e14b1f1e7a025e31df7c4f507e869cb",
+  "source_commit": "d7fb32f46faf57ef88c78f392c251312e8ae5cc8",
   "source_backend": "setuptools.build_meta:__legacy__",
   "source_backend_path": [],
   "minimum_glibc": [
@@ -12,18 +12,29 @@
     "binary_wheels.json",
     "README.binary-wheels.md",
     "pyproject.toml",
-    "MANIFEST.in"
+    "MANIFEST.in",
+    ".github/scripts/check_installed_typing.py",
+    ".github/workflows/cp315t-delivery.yml"
   ],
   "delivery_source_hashes": {
-    "_binary_wheel_backend.py": "fc4697ea1ee586c2ae3df2397be14ef13246f7b7b8f42485057e36c0852fe37a",
-    "README.binary-wheels.md": "294bd6cf8a0cf000dc444817fcf3ec39a4116ca900f5b931f18c6c573836d829",
+    "_binary_wheel_backend.py": "cd179fcfd11bc33b1196d7174ef9e03a162acc116174b19305dd991534751834",
+    "README.binary-wheels.md": "23b67de2fd2282bf61f50da6e1eb7f17cc0098d482c694ee2713c8fd640f5b99",
     "pyproject.toml": "889a8a53f45eb6171dd26f57ecf3bbba98101bbeed57b9e4faa80701dcc790c7",
-    "MANIFEST.in": "995b2dd19a62759bdcc1a384d84eb0f3a7fab2258596c053a02f949c9a8b2358"
+    "MANIFEST.in": "30fbfa6735a3c88b028252665a151eb1c8e08a2ec899572506628f826e217b3f",
+    ".github/scripts/check_installed_typing.py": "c8c9eede1d6d3471dd27f53c1609b51958032ab4e29f6ec2e3f54bd20a94024d",
+    ".github/workflows/cp315t-delivery.yml": "aa34a00f18830db272e26f20d5e19d87f7a9d0e057f55a5ca1b98044ee0c3c7c"
   },
-  "artifact": {
-    "filename": "pybluez-0.31-1-cp315-cp315t-manylinux_2_39_x86_64.whl",
-    "sha256": "d1a4fb0de74258249b1ad9fd9eee4dd387b7e0e424b072b7b516fd4e4fc582ea",
-    "url": "https://github.com/StableKite/pybluez/releases/download/cp315t-linux-r68-default-giloff-20261024/pybluez-0.31-1-cp315-cp315t-manylinux_2_39_x86_64.whl"
-  },
-  "runtime_gil_override_required": false
+  "runtime_gil_override_required": false,
+  "artifacts": {
+    "win_amd64": {
+      "filename": "pybluez-0.31+stablekite.1-cp315-cp315t-win_amd64.whl",
+      "sha256": "09fd0f71813b22f10cf1c0ea4aaa0acf1ef7a40c2777b65c37293df8d9edcaef",
+      "url": "https://github.com/StableKite/pybluez/releases/download/cp315t-windows-linux-engineering-20261031/pybluez-0.31+stablekite.1-cp315-cp315t-win_amd64.whl"
+    },
+    "linux_x86_64": {
+      "filename": "pybluez-0.31+stablekite.1-cp315-cp315t-manylinux_2_38_x86_64.manylinux_2_39_x86_64.whl",
+      "sha256": "be0b2c33b3e12952c60a3fa96baadd129d1556f590ef40aee08c82d847ff0d28",
+      "url": "https://github.com/StableKite/pybluez/releases/download/cp315t-windows-linux-engineering-20261031/pybluez-0.31+stablekite.1-cp315-cp315t-manylinux_2_38_x86_64.manylinux_2_39_x86_64.whl"
+    }
+  }
 }
