@@ -1,12 +1,16 @@
 """Linux-only software tests; no Bluetooth device or SDP server is contacted."""
 import concurrent.futures
+import sys
+import unittest
+
+if not sys.platform.startswith('linux'):
+    raise unittest.SkipTest('BlueZ backend is Linux-only')
+
 import fcntl
 import os
 import socket
-import sys
 import sysconfig
 import threading
-import unittest
 
 from bluetooth import _bluetooth as bt
 

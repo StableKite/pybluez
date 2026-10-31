@@ -28,31 +28,31 @@ jobs:
           - target: Windows x86_64
             id: windows-x64
             runner: windows-latest
-            cibw_build: cp314t-win_amd64
+            cibw_build: cp315t-win_amd64
             before_all: ""
 
           - target: manylinux x86_64
             id: manylinux-x64
             runner: ubuntu-24.04
-            cibw_build: cp314t-manylinux_x86_64
+            cibw_build: cp315t-manylinux_x86_64
             before_all: dnf install -y bluez-libs-devel
 
           - target: manylinux aarch64
             id: manylinux-arm64
             runner: ubuntu-24.04-arm
-            cibw_build: cp314t-manylinux_aarch64
+            cibw_build: cp315t-manylinux_aarch64
             before_all: dnf install -y bluez-libs-devel
 
           - target: musllinux x86_64
             id: musllinux-x64
             runner: ubuntu-24.04
-            cibw_build: cp314t-musllinux_x86_64
+            cibw_build: cp315t-musllinux_x86_64
             before_all: apk add --no-cache bluez-dev
 
           - target: musllinux aarch64
             id: musllinux-arm64
             runner: ubuntu-24.04-arm
-            cibw_build: cp314t-musllinux_aarch64
+            cibw_build: cp315t-musllinux_aarch64
             before_all: apk add --no-cache bluez-dev
 
     runs-on: ${{ matrix.runner }}
@@ -79,9 +79,7 @@ jobs:
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
 
           CIBW_TEST_COMMAND: >-
-            python -c "import bluetooth, sysconfig;
-            assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1;
-            print('PyBluez', bluetooth.__version__)"
+            python -m unittest discover -s "{project}/tests" -p "test_*.py" -v
         with:
           output-dir: wheelhouse
 
@@ -103,10 +101,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python 3.14t
+      - name: Set up Python 3.15t
         uses: actions/setup-python@v7
         with:
-          python-version: "3.14t"
+          python-version: "3.15t"
 
       - name: Install build frontend
         run: python -m pip install build wheel

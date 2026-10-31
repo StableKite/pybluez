@@ -1,16 +1,49 @@
-# Free-threaded Linux CPython
+# Free-threaded CPython Bluetooth backends
 
-The Linux extension declares GIL-free import support after porting socket
-descriptor/timeout state to atomics, making close transfer descriptor ownership
-once, snapshotting poll inputs, and serializing native SDP connection lifetime.
-SDP locks are released before reattaching Python thread state or constructing
-Python results. HCI filters are mutable bytearrays; immutable bytes inputs are
-copied, never modified. Filter predicates return bool and setsockopt accepts
-binary buffer values.
+## Windows
 
-As with POSIX sockets, applications must coordinate close/reinitialization with
-in-flight I/O and serialize advertisement setup/teardown on a socket. Discovery,
-HCI and advertisement calls still require actual Bluetooth hardware/permissions.
-No hardware operations are performed by the regression suite; it uses UNIX
-socketpairs wrapped through fromfd, closed SDP sessions, and pure filter/opcode
-helpers. This change does not claim hardware acceptance.
+The Microsoft backend retains all 23 native entry points and actual Windows
+Bluetooth/SDP SDK calls. It uses full-width SOCKET/HANDLE values, owned Unicode
+and immutable I/O buffers, immediate native-error capture and checked resource
+cleanup. A native lock initializes the process Winsock reference once; another
+short native lock makes socket option transactions consistent. Neither encloses
+Python API calls or blocking send/receive/accept operations.
+
+BluetoothSocket protects owner/state transitions with a per-object RLock.
+Each public I/O operation duplicates the native socket under that lock, releases
+the lock before I/O, then closes only its own duplicate. Closing the owner is
+idempotent and cannot recycle another call's descriptor. Reader and writer can
+run concurrently. A pending call retains its endpoint until its lease ends;
+applications should arrange peer completion or a finite timeout before closing
+an owner with pending I/O. dup() shares endpoint options as Winsock specifies.
+Advertisement registration/removal and its Python metadata form a serialized
+transaction. Metadata is committed only after actual SDK success.
+
+The stateless, multi-phase module declares no GIL use after these ownership and
+synchronization changes. No PYTHON_GIL or -X gil override is required.
+The annotated Windows wrapper and shared SDP codec have accurate native stubs;
+other platform wrappers retain their existing typing status.
+
+Software tests exercise actual native Winsock I/O on owned loopback sockets,
+full duplex, concurrent close and descriptor reuse, mutable buffers, options,
+timeouts, GC and threaded initialization. Local radio enumeration is read-only.
+They do not perform a remote device inquiry, Bluetooth connection or service
+registration. Physical RFCOMM, discovery and live SDP still need a separate
+hardware acceptance run; software qualification does not claim that result.
+The pre-existing Windows makefile/DeviceDiscoverer omissions remain documented.
+
+## Linux
+
+The existing native implementation is retained: atomic socket/timeout state,
+close-once descriptor ownership, snapshotted poll inputs, serialized native SDP
+connection lifetime and bytearray HCI filters. Its eight original software
+regressions run unchanged, apart from an explicit OS guard before Linux-only
+imports. As with POSIX sockets, coordinate close/reinitialization with pending
+I/O and serialize advertisement setup/removal. Real HCI/discovery/SDP requires
+hardware and permissions. No hardware acceptance is inferred from these tests.
+
+## SDP codec
+
+Encoded string lengths use UTF-8 byte counts. Boolean, signed/unsigned 128-bit
+integers and URL elements have actual binary encoders; parser bounds errors
+raise ValueError. Existing decoded string/short-UUID byte values are preserved.

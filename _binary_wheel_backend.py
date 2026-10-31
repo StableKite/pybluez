@@ -1,23 +1,52 @@
 """PEP 517 release-wheel delivery with the project's original source fallback."""
+from __future__ import annotations
+
 import hashlib
 import importlib
 import json
 import os
-from pathlib import Path
 import platform
 import subprocess
 import sys
 import sysconfig
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
+
+if TYPE_CHECKING:
+    from typing import Protocol, TypedDict
+
+    ConfigSettings = Dict[str, Union[str, List[str]]]
+
+    class Artifact(TypedDict):
+        filename: str
+        url: str
+        sha256: str
+
+    class Manifest(TypedDict):
+        source_commit: str
+        source_backend: str
+        source_backend_path: List[str]
+        minimum_glibc: List[int]
+        source_project: str
+        delivery_paths: List[str]
+        delivery_source_hashes: Dict[str, str]
+        artifacts: Dict[str, Artifact]
+        initialize_source_submodules: bool
+
+    class SourceBackend(Protocol):
+        def get_requires_for_build_wheel(self, config_settings: Optional[ConfigSettings] = None) -> List[str]: ...
+        def build_wheel(self, wheel_directory: str, config_settings: Optional[ConfigSettings] = None,
+                        metadata_directory: Optional[str] = None) -> str: ...
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / 'binary_wheels.json'
 
 
-def _manifest():
-    return json.loads(MANIFEST.read_text(encoding='utf8'))
+def _manifest() -> Manifest:
+    return cast('Manifest', json.loads(MANIFEST.read_text(encoding='utf8')))
 
 
-def _normalized_project(path):
+def _normalized_project(path: Path) -> str:
     import tomllib
     data = tomllib.loads(path.read_text(encoding='utf8'))
     build = data.get('build-system', {})
@@ -26,22 +55,29 @@ def _normalized_project(path):
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
-def _asset(config_settings=None):
+def _asset(config_settings: Optional[ConfigSettings] = None) -> Optional[Artifact]:
     if (config_settings or sys.version_info[:2] != (3, 15)
             or not sysconfig.get_config_var('Py_GIL_DISABLED')
-            or sys.platform != 'linux' or platform.machine() != 'x86_64'):
+            or sysconfig.get_config_var('Py_DEBUG')):
+        return None
+    if sysconfig.get_platform() == 'win-amd64':
+        target = 'win_amd64'
+    elif sys.platform == 'linux' and platform.machine() == 'x86_64':
+        target = 'linux_x86_64'
+    else:
         return None
     if any(os.environ.get(name) for name in
            ('CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'CC', 'CXX')):
         return None
     data = _manifest()
-    libc, version = platform.libc_ver()
-    if (libc != 'glibc'
-            or tuple(map(int, version.split('.'))) < tuple(data['minimum_glibc'])):
-        return None
+    if target == 'linux_x86_64':
+        libc, version = platform.libc_ver()
+        if (libc != 'glibc'
+                or tuple(map(int, version.split('.'))) < tuple(data['minimum_glibc'])):
+            return None
     for name, digest in data['delivery_source_hashes'].items():
         path = ROOT / name
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if not path.is_file() or hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest() != digest:
             return None
     if _normalized_project(ROOT / 'pyproject.toml') != data['source_project']:
         return None
@@ -61,10 +97,10 @@ def _asset(config_settings=None):
             return None
     except (OSError, subprocess.SubprocessError):
         return None
-    return data['artifact']
+    return data['artifacts'].get(target)
 
 
-def _source():
+def _source() -> SourceBackend:
     data = _manifest()
     if data.get('initialize_source_submodules'):
         subprocess.check_call(
@@ -73,16 +109,17 @@ def _source():
         sys.path.insert(0, str(ROOT / path))
     module, separator, attribute = data['source_backend'].partition(':')
     backend = importlib.import_module(module)
-    return getattr(backend, attribute) if separator else backend
+    return cast('SourceBackend', getattr(backend, attribute) if separator else backend)
 
 
-def get_requires_for_build_wheel(config_settings=None):
+def get_requires_for_build_wheel(config_settings: Optional[ConfigSettings] = None) -> List[str]:
     if _asset(config_settings):
         return ['pip']
     return _source().get_requires_for_build_wheel(config_settings)
 
 
-def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+def build_wheel(wheel_directory: str, config_settings: Optional[ConfigSettings] = None,
+                metadata_directory: Optional[str] = None) -> str:
     asset = _asset(config_settings)
     if asset is None:
         return _source().build_wheel(wheel_directory, config_settings, metadata_directory)
@@ -94,8 +131,8 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     return asset['filename']
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> object:
     # Let pip obtain metadata from its retained wheel, avoiding a second download.
     if name == 'prepare_metadata_for_build_wheel' and _asset() is not None:
         raise AttributeError(name)
-    return getattr(_source(), name)
+    return cast(object, getattr(_source(), name))
